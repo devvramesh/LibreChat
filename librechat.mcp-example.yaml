@@ -84,8 +84,8 @@ mcpServers:
   memory:
     type: sse
     url: http://mcp_memory:3003/sse
-    timeout: 30000
-    initTimeout: 30000
+    timeout: 120000
+    initTimeout: 60000
     serverInstructions: |
       Tools available: add_memory, search_memory, get_all_memories, delete_memory.
       - add_memory: Store important user info, preferences, or context for future recall. Do NOT store trivial info.
