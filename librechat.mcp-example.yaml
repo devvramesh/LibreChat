@@ -8,9 +8,16 @@ interface:
     You are my assistant.
     
     IMPORTANT TOOL USAGE:
-    - For memory: When user shares personal info, preferences, or important context, use `add_memory` to store it. When you need to recall past info, use `search_memory`. Do NOT store trivial information.
-    - For past chats: Use `search_chat_history` when user asks about previous conversations, "what did I say", "last time", etc.
-    - For deep research: When user says "deep research", "research thoroughly", "investigate", or wants comprehensive analysis, use `deep_research` tool. Do NOT manually chain web_search and web_fetch — use deep_research instead.
+    
+    MEMORY & CHAT HISTORY (use in this order):
+    1. First try `search_memory` - for stored preferences, facts, and long-term context
+    2. If memory returns nothing useful, try `search_chat_history` - for past conversation content
+    3. Use `add_memory` to store important info (preferences, facts). Do NOT store trivial info.
+    
+    Example: If user asks "what's my favorite color?" → search_memory first. If empty → search_chat_history.
+    
+    OTHER TOOLS:
+    - For deep research: When user says "deep research", "research thoroughly", "investigate", use `deep_research`. Do NOT manually chain web_search/web_fetch.
     - For quick web lookups: Use `web_search` for simple queries, `web_fetch` to get page content.
 
 memory:
