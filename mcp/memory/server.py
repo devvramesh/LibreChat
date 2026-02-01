@@ -407,6 +407,7 @@ def call_tool_sync(name: str, arguments: dict) -> dict:
             query = arguments.get("query", "")
             user_id = arguments.get("user_id", "default")
             limit = arguments.get("limit", 5)
+            min_score = 0.65  # Minimum relevance threshold
 
             if not query:
                 return {"content": [{"type": "text", "text": "Error: query is required"}], "isError": True}
@@ -418,22 +419,32 @@ def call_tool_sync(name: str, arguments: dict) -> dict:
             results = response.get("results", []) if isinstance(response, dict) else response
 
             if not results:
-                return {"content": [{"type": "text", "text": f"No memories found for query: {query}"}]}
+                return {"content": [{"type": "text", "text": f"No memories found for: {query}. Try search_chat_history for past conversations."}]}
+
+            # Filter by minimum score to avoid irrelevant results
+            relevant_results = []
+            for r in results:
+                if isinstance(r, dict):
+                    score = r.get("score", 0)
+                    if isinstance(score, (int, float)) and score >= min_score:
+                        relevant_results.append(r)
+            
+            if not relevant_results:
+                return {"content": [{"type": "text", "text": f"No relevant memories found for: {query}. Try search_chat_history for past conversations."}]}
 
             # Format results
             formatted = []
-            for i, r in enumerate(results):
-                if isinstance(r, dict):
-                    score = r.get("score", "N/A")
-                    text = r.get("memory", r.get("text", ""))
-                    mem_id = r.get("id", "unknown")
-                    score_str = f"{score:.3f}" if isinstance(score, (int, float)) else str(score)
-                    formatted.append(f"[{i+1}] (score: {score_str}, id: {mem_id})\n{text}")
+            for i, r in enumerate(relevant_results):
+                score = r.get("score", "N/A")
+                text = r.get("memory", r.get("text", ""))
+                mem_id = r.get("id", "unknown")
+                score_str = f"{score:.3f}" if isinstance(score, (int, float)) else str(score)
+                formatted.append(f"[{i+1}] (score: {score_str}, id: {mem_id})\n{text}")
 
             return {
                 "content": [{
                     "type": "text",
-                    "text": f"Found {len(results)} memories:\n\n" + "\n\n---\n\n".join(formatted)
+                    "text": f"Found {len(relevant_results)} relevant memories:\n\n" + "\n\n---\n\n".join(formatted)
                 }]
             }
 

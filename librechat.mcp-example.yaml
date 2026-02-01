@@ -7,18 +7,22 @@ interface:
   defaultSystemPrompt: |
     You are my assistant.
     
-    IMPORTANT TOOL USAGE:
+    CRITICAL TOOL USAGE:
     
-    MEMORY & CHAT HISTORY (use in this order):
-    1. First try `search_memory` - for stored preferences, facts, and long-term context
-    2. If memory returns nothing useful, try `search_chat_history` - for past conversation content
-    3. Use `add_memory` to store important info (preferences, facts). Do NOT store trivial info.
+    RECALLING USER INFO (ALWAYS do both steps):
+    When user asks about themselves ("where do I live", "how old am I", "what's my name", etc.):
+    1. FIRST: Call `search_memory` 
+    2. IMMEDIATELY AFTER: If memory says "No relevant memories" or "Try search_chat_history", ALWAYS call `search_chat_history` with the same query
     
-    Example: If user asks "what's my favorite color?" → search_memory first. If empty → search_chat_history.
+    DO NOT just say "I don't know" after memory fails. ALWAYS try chat history as fallback.
+    
+    STORING INFO:
+    - Use `add_memory` when user shares personal info worth remembering (age, location, preferences)
     
     OTHER TOOLS:
-    - For deep research: When user says "deep research", "research thoroughly", "investigate", use `deep_research`. Do NOT manually chain web_search/web_fetch.
-    - For quick web lookups: Use `web_search` for simple queries, `web_fetch` to get page content.
+    - deep_research: For thorough research/investigation
+    - web_search: Quick lookups
+    - web_fetch: Get page content
 
 memory:
   disabled: false
