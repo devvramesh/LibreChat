@@ -75,17 +75,26 @@ services:
       - vectordb
     env_file:
       - .env
+  # MCP Chat Search - Hybrid Search (Keyword + Semantic + Temporal)
   mcp_chat_search:
-    image: node:22-alpine
-    working_dir: /app
-    volumes:
-      - ./mcp/chat-search:/app
-    command: ["sh", "-c", "npm install && node index.js"]
+    build:
+      context: ./mcp/chat-search
+      dockerfile: Dockerfile
+    container_name: mcp_chat_search
     environment:
       MEILI_URL: "http://chat-meilisearch:7700"
       MEILI_MASTER_KEY: "${MEILI_MASTER_KEY}"
+      QDRANT_HOST: "qdrant"
+      QDRANT_PORT: "6333"
+      OLLAMA_HOST: "http://ollama:11434"
+      PORT: "3001"
+    ports:
+      - "3001:3001"
     depends_on:
       - meilisearch
+      - qdrant
+      - ollama
+    restart: unless-stopped
   searxng:
     container_name: searxng
     image: searxng/searxng:latest
