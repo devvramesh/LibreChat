@@ -406,45 +406,72 @@ def call_tool_sync(name: str, arguments: dict) -> dict:
         elif name == "search_memory":
             query = arguments.get("query", "")
             user_id = arguments.get("user_id", "default")
-            limit = arguments.get("limit", 5)
-            min_score = 0.65  # Minimum relevance threshold
+            limit = arguments.get("limit", 10)
 
             if not query:
                 return {"content": [{"type": "text", "text": "Error: query is required"}], "isError": True}
 
             logger.info(f"[Memory] Searching memories for user {user_id}: {query}")
+            
+            # HYBRID SEARCH: Combine keyword and vector search
+            # 1. Get all memories for keyword matching
+            all_memories = mem.get_all(user_id=user_id)
+            all_list = all_memories.get("results", []) if isinstance(all_memories, dict) else all_memories
+            
+            # 2. Keyword match (case-insensitive substring matching)
+            query_lower = query.lower()
+            query_words = set(query_lower.split())
+            keyword_matches = []
+            for m in all_list:
+                if isinstance(m, dict):
+                    text = m.get("memory", m.get("text", "")).lower()
+                    # Check if any query word is in the memory text
+                    if any(word in text for word in query_words if len(word) > 2):
+                        keyword_matches.append({
+                            "id": m.get("id"),
+                            "memory": m.get("memory", m.get("text", "")),
+                            "score": 1.5,  # Boost keyword matches
+                            "match_type": "keyword"
+                        })
+            
+            # 3. Vector search
             response = mem.search(query, user_id=user_id, limit=limit)
+            vector_results = response.get("results", []) if isinstance(response, dict) else response
             
-            # Mem0 returns {'results': [...]} dict
-            results = response.get("results", []) if isinstance(response, dict) else response
-
-            if not results:
+            # 4. Merge results (keyword matches first, then vector, deduplicated)
+            seen_ids = set()
+            merged = []
+            
+            # Add keyword matches first
+            for r in keyword_matches:
+                if r["id"] not in seen_ids:
+                    seen_ids.add(r["id"])
+                    merged.append(r)
+            
+            # Add vector results
+            for r in vector_results:
+                if isinstance(r, dict) and r.get("id") not in seen_ids:
+                    seen_ids.add(r.get("id"))
+                    r["match_type"] = "semantic"
+                    merged.append(r)
+            
+            if not merged:
                 return {"content": [{"type": "text", "text": f"No memories found for: {query}. Try search_chat_history for past conversations."}]}
-
-            # Filter by minimum score to avoid irrelevant results
-            relevant_results = []
-            for r in results:
-                if isinstance(r, dict):
-                    score = r.get("score", 0)
-                    if isinstance(score, (int, float)) and score >= min_score:
-                        relevant_results.append(r)
-            
-            if not relevant_results:
-                return {"content": [{"type": "text", "text": f"No relevant memories found for: {query}. Try search_chat_history for past conversations."}]}
 
             # Format results
             formatted = []
-            for i, r in enumerate(relevant_results):
+            for i, r in enumerate(merged[:limit]):
                 score = r.get("score", "N/A")
                 text = r.get("memory", r.get("text", ""))
-                mem_id = r.get("id", "unknown")
+                match_type = r.get("match_type", "")
                 score_str = f"{score:.3f}" if isinstance(score, (int, float)) else str(score)
-                formatted.append(f"[{i+1}] (score: {score_str}, id: {mem_id})\n{text}")
+                type_tag = f" [{match_type}]" if match_type else ""
+                formatted.append(f"[{i+1}] (score: {score_str}{type_tag})\n{text}")
 
             return {
                 "content": [{
                     "type": "text",
-                    "text": f"Found {len(relevant_results)} relevant memories:\n\n" + "\n\n---\n\n".join(formatted)
+                    "text": f"Found {len(merged[:limit])} memories for '{query}':\n\n" + "\n\n---\n\n".join(formatted)
                 }]
             }
 
