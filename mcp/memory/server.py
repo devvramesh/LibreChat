@@ -357,16 +357,35 @@ TOOLS = [
     },
     {
         "name": "delete_memory",
-        "description": "Delete a specific memory by its ID. Use when user asks to forget something.",
+        "description": "Delete a specific memory by its UUID. Use when user asks to forget something specific.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "memory_id": {
                     "type": "string",
-                    "description": "The ID of the memory to delete"
+                    "description": "The UUID of the memory to delete (from search results)"
                 }
             },
             "required": ["memory_id"]
+        }
+    },
+    {
+        "name": "delete_memories_by_keyword",
+        "description": "Delete all memories containing a specific keyword. Use when user wants to bulk delete memories (e.g., 'delete all anime memories').",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "keyword": {
+                    "type": "string",
+                    "description": "Keyword to match in memory text (case-insensitive)"
+                },
+                "user_id": {
+                    "type": "string",
+                    "description": "User identifier (default: 'default')",
+                    "default": "default"
+                }
+            },
+            "required": ["keyword"]
         }
     }
 ]
@@ -458,15 +477,16 @@ def call_tool_sync(name: str, arguments: dict) -> dict:
             if not merged:
                 return {"content": [{"type": "text", "text": f"No memories found for: {query}. Try search_chat_history for past conversations."}]}
 
-            # Format results
+            # Format results - include ID for deletion
             formatted = []
             for i, r in enumerate(merged[:limit]):
                 score = r.get("score", "N/A")
                 text = r.get("memory", r.get("text", ""))
+                mem_id = r.get("id", "unknown")
                 match_type = r.get("match_type", "")
                 score_str = f"{score:.3f}" if isinstance(score, (int, float)) else str(score)
                 type_tag = f" [{match_type}]" if match_type else ""
-                formatted.append(f"[{i+1}] (score: {score_str}{type_tag})\n{text}")
+                formatted.append(f"[{i+1}] id={mem_id}\n{text}")
 
             return {
                 "content": [{
@@ -515,6 +535,43 @@ def call_tool_sync(name: str, arguments: dict) -> dict:
                 "content": [{
                     "type": "text",
                     "text": f"Memory {memory_id} deleted successfully"
+                }]
+            }
+
+        elif name == "delete_memories_by_keyword":
+            keyword = arguments.get("keyword", "")
+            user_id = arguments.get("user_id", "default")
+
+            if not keyword:
+                return {"content": [{"type": "text", "text": "Error: keyword is required"}], "isError": True}
+
+            logger.info(f"[Memory] Deleting memories containing '{keyword}' for user {user_id}")
+            
+            # Get all memories
+            all_memories = mem.get_all(user_id=user_id)
+            all_list = all_memories.get("results", []) if isinstance(all_memories, dict) else all_memories
+            
+            # Find and delete matching memories
+            keyword_lower = keyword.lower()
+            deleted = []
+            for m in all_list:
+                if isinstance(m, dict):
+                    text = m.get("memory", m.get("text", "")).lower()
+                    if keyword_lower in text:
+                        mem_id = m.get("id")
+                        try:
+                            mem.delete(mem_id)
+                            deleted.append(m.get("memory", m.get("text", ""))[:50])
+                        except Exception as e:
+                            logger.error(f"[Memory] Failed to delete {mem_id}: {e}")
+            
+            if not deleted:
+                return {"content": [{"type": "text", "text": f"No memories found containing '{keyword}'"}]}
+            
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": f"Deleted {len(deleted)} memories containing '{keyword}':\n" + "\n".join(f"- {d}..." for d in deleted)
                 }]
             }
 
