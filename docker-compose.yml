@@ -104,7 +104,54 @@ services:
       SEARXNG_URL: "http://searxng:8080"
     depends_on:
       - searxng
+  # Ollama - local LLM for memory extraction
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    # Uncomment below if you have NVIDIA GPU
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    restart: unless-stopped
+  # Qdrant - vector database for semantic search
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    volumes:
+      - qdrant_data:/qdrant/storage
+    ports:
+      - "6333:6333"
+    restart: unless-stopped
+  # MCP Memory Server with Mem0
+  mcp_memory:
+    build:
+      context: ./mcp/memory
+      dockerfile: Dockerfile
+    container_name: mcp_memory
+    environment:
+      OLLAMA_HOST: "http://ollama:11434"
+      QDRANT_HOST: "qdrant"
+      QDRANT_PORT: "6333"
+      PORT: "3003"
+      LLM_MODEL: "llama3.1:8b"
+      EMBED_MODEL: "nomic-embed-text"
+    ports:
+      - "3003:3003"
+    depends_on:
+      - ollama
+      - qdrant
+    restart: unless-stopped
 
 
 volumes:
   pgdata2:
+  ollama_data:
+  qdrant_data:

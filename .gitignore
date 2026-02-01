@@ -177,3 +177,6 @@ mcp/*/package-lock.json
 # SearXNG data (if any runtime data is generated)
 searxng/*.db
 
+# MCP Memory server
+mcp/memory/__pycache__/
+!mcp/memory/
