@@ -21,6 +21,8 @@ from starlette.responses import StreamingResponse
 import uvicorn
 
 from mem0 import Memory
+from mem0.llms.anthropic import AnthropicLLM
+import re
 
 # =============================================================================
 # LOGGING
@@ -28,6 +30,56 @@ from mem0 import Memory
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# CUSTOM ANTHROPIC LLM (fixes JSON extraction)
+# =============================================================================
+
+class AnthropicLLMFixed(AnthropicLLM):
+    """
+    Custom Anthropic LLM that extracts JSON from Claude's response.
+    Claude often adds preamble text before JSON, which breaks Mem0's parsing.
+    """
+    
+    def generate_response(self, messages, response_format=None, tools=None, tool_choice="auto", **kwargs):
+        # Get the raw response from parent
+        response = super().generate_response(messages, response_format, tools, tool_choice, **kwargs)
+        
+        # Try to extract JSON from the response
+        extracted = self._extract_json(response)
+        if extracted:
+            return extracted
+        
+        # If no JSON found, return original response
+        return response
+    
+    def _extract_json(self, text: str) -> Optional[str]:
+        """Extract JSON object from text that may contain preamble."""
+        if not text:
+            return None
+        
+        # Try to find JSON object pattern
+        # Look for {"facts": ...} pattern
+        match = re.search(r'\{[^{}]*"facts"\s*:\s*\[[^\]]*\][^{}]*\}', text, re.DOTALL)
+        if match:
+            try:
+                # Validate it's proper JSON
+                json.loads(match.group())
+                return match.group()
+            except json.JSONDecodeError:
+                pass
+        
+        # Try to find any JSON object
+        match = re.search(r'\{[\s\S]*\}', text)
+        if match:
+            try:
+                json.loads(match.group())
+                return match.group()
+            except json.JSONDecodeError:
+                pass
+        
+        return None
 
 # =============================================================================
 # CONFIGURATION
@@ -38,7 +90,7 @@ LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "anthropic")
 
 # Anthropic config
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-3-5-haiku-20241022")
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-3-haiku-20240307")
 
 # Bedrock config (for future use)
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
@@ -158,6 +210,13 @@ def get_memory() -> Memory:
     global memory
     if memory is None:
         logger.info(f"[Memory] Initializing with LLM_PROVIDER={LLM_PROVIDER}")
+        
+        # Monkey-patch Anthropic LLM to fix JSON extraction
+        if LLM_PROVIDER == "anthropic":
+            import mem0.llms.anthropic
+            mem0.llms.anthropic.AnthropicLLM = AnthropicLLMFixed
+            logger.info("[Memory] Patched AnthropicLLM with JSON extraction fix")
+        
         config = build_mem0_config()
         memory = Memory.from_config(config)
         logger.info("[Memory] Mem0 initialized successfully")
