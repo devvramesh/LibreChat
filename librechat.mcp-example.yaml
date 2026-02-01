@@ -1,0 +1,79 @@
+version: 1.3.3
+
+interface:
+  memories: true
+  mcpServers:
+    use: true
+  defaultSystemPrompt: |
+    You are my assistant.
+    
+    IMPORTANT TOOL USAGE:
+    - For past chats: Use `search_chat_history` when user asks about previous conversations, "what did I say", "last time", etc.
+    - For deep research: When user says "deep research", "research thoroughly", "investigate", or wants comprehensive analysis, use `deep_research` tool. Do NOT manually chain web_search and web_fetch — use deep_research instead.
+    - For quick web lookups: Use `web_search` for simple queries, `web_fetch` to get page content.
+
+memory:
+  disabled: false
+  personalize: true
+  messageWindowSize: 6
+  tokenLimit: 1200
+  charLimit: 5000
+  validKeys:
+    - user_preferences
+    - personal_information
+    - user_experiences
+    - active_projects
+    - workflows
+    - tooling_stack
+    - long_term_goals
+
+  agent:
+    provider: anthropic
+    model: "claude-haiku-4-5"
+    instructions: |
+      You maintain the user's long-term memory. Be conservative.
+
+      HARD RULES:
+      - Only write memories using the allowed validKeys.
+      - Store durable preferences, recurring workflows, long-running projects, and stable constraints.
+      - Do NOT store transient chat content, brainstorming, or one-off tasks.
+      - Do NOT store secrets (API keys, passwords, tokens), personal identifiers, or anything sensitive.
+      - If the user corrects a memory or says "don't remember", delete/overwrite it.
+      - When uncertain, store nothing.
+
+      KEY DEFINITIONS:
+      - user_preferences: response style, formatting defaults, UI preferences
+      - workflows: repeatable routines (research format, coding conventions)
+      - active_projects: ongoing workstreams (e.g., FullGen.ai)
+      - tooling_stack: infra/tools/services you use (Docker, AWS, etc.)
+      - long_term_goals: persistent objectives (privacy-first, phone access)
+
+    model_parameters:
+      temperature: 0.2
+      max_tokens: 300
+
+mcpSettings:
+  allowedDomains:
+    - mcp_chat_search
+    - mcp_web_search
+    - meilisearch
+    - searxng
+
+mcpServers:
+  chat-search:
+    type: sse
+    url: http://mcp_chat_search:3001/sse
+    timeout: 20000
+    initTimeout: 20000
+    serverInstructions: |
+      Use this to search prior chats. Return only relevant snippets with messageId + conversationId + sender + text.
+  web-search:
+    type: sse
+    url: http://mcp_web_search:3002/sse
+    timeout: 60000
+    initTimeout: 20000
+    serverInstructions: |
+      Tools available: web_search, web_fetch, deep_research.
+      - web_search: Quick internet search, returns top results.
+      - web_fetch: Fetch full page content from a URL.
+      - deep_research: USE THIS when user wants thorough research, investigation, or comprehensive analysis. Do NOT manually chain web_search/web_fetch — call deep_research once instead.

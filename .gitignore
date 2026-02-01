@@ -169,3 +169,11 @@ coordination/orchestration/*
 claude-flow
 # Removed Windows wrapper files per user request
 hive-mind-prompt-*.txt
+
+# MCP server dependencies
+mcp/*/node_modules/
+mcp/*/package-lock.json
+
+# SearXNG data (if any runtime data is generated)
+searxng/*.db
+

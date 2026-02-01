@@ -21,12 +21,18 @@ services:
       - RAG_PORT=${RAG_PORT:-8000}
       - RAG_API_URL=http://rag_api:${RAG_PORT:-8000}
     volumes:
-      - type: bind
-        source: ./.env
-        target: /app/.env
-      - ./images:/app/client/public/images
-      - ./uploads:/app/uploads
-      - ./logs:/app/logs
+    - type: bind
+      source: ./.env
+      target: /app/.env
+
+    - type: bind
+      source: ./librechat.yaml
+      target: /app/librechat.yaml
+
+    - ./images:/app/client/public/images
+    - ./uploads:/app/uploads
+    - ./logs:/app/logs
+    - ./mcp:/app/mcp
   mongodb:
     container_name: chat-mongodb
     image: mongo:8.0.17
@@ -46,6 +52,8 @@ services:
       - MEILI_MASTER_KEY=${MEILI_MASTER_KEY}
     volumes:
       - ./meili_data_v1.12:/meili_data
+    ports:
+      - "7700:7700"
   vectordb:
     container_name: vectordb
     image: pgvector/pgvector:0.8.0-pg15-trixie
@@ -67,6 +75,36 @@ services:
       - vectordb
     env_file:
       - .env
+  mcp_chat_search:
+    image: node:22-alpine
+    working_dir: /app
+    volumes:
+      - ./mcp/chat-search:/app
+    command: ["sh", "-c", "npm install && node index.js"]
+    environment:
+      MEILI_URL: "http://chat-meilisearch:7700"
+      MEILI_MASTER_KEY: "${MEILI_MASTER_KEY}"
+    depends_on:
+      - meilisearch
+  searxng:
+    container_name: searxng
+    image: searxng/searxng:latest
+    restart: always
+    volumes:
+      - ./searxng:/etc/searxng
+    ports:
+      - "8080:8080"
+  mcp_web_search:
+    image: node:22-alpine
+    working_dir: /app
+    volumes:
+      - ./mcp/web-search:/app
+    command: ["sh", "-c", "npm install && node index.js"]
+    environment:
+      SEARXNG_URL: "http://searxng:8080"
+    depends_on:
+      - searxng
+
 
 volumes:
   pgdata2:
