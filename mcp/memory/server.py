@@ -357,7 +357,8 @@ def call_tool_sync(name: str, arguments: dict) -> dict:
                     score = r.get("score", "N/A")
                     text = r.get("memory", r.get("text", ""))
                     mem_id = r.get("id", "unknown")
-                    formatted.append(f"[{i+1}] (score: {score:.3f if isinstance(score, float) else score}, id: {mem_id})\n{text}")
+                    score_str = f"{score:.3f}" if isinstance(score, (int, float)) else str(score)
+                    formatted.append(f"[{i+1}] (score: {score_str}, id: {mem_id})\n{text}")
 
             return {
                 "content": [{
