@@ -33,42 +33,112 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# CUSTOM ANTHROPIC LLM (fixes JSON extraction)
+# CUSTOM ANTHROPIC LLM (uses Tool Use for reliable structured output)
 # =============================================================================
+
+# Tool definition for extracting facts - forces structured output
+FACTS_EXTRACTION_TOOL = {
+    "name": "extract_facts",
+    "description": "Extract facts and preferences from user messages",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "facts": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "List of facts extracted from user messages"
+            }
+        },
+        "required": ["facts"]
+    }
+}
+
 
 class AnthropicLLMFixed(AnthropicLLM):
     """
-    Custom Anthropic LLM that extracts JSON from Claude's response.
-    Claude often adds preamble text before JSON, which breaks Mem0's parsing.
+    Custom Anthropic LLM that uses Tool Use for reliable structured JSON output.
+    Forces the model to use a tool call instead of free-form text.
     """
     
     def generate_response(self, messages, response_format=None, tools=None, tool_choice="auto", **kwargs):
-        # Get the raw response from parent
+        # Check if this is a facts extraction request (Mem0's internal call)
+        is_facts_request = self._is_facts_extraction_request(messages)
+        
+        if is_facts_request and not tools:
+            # Use Tool Use for reliable structured output
+            return self._generate_with_tool_use(messages, **kwargs)
+        
+        # For other requests, use normal flow with JSON extraction fallback
         response = super().generate_response(messages, response_format, tools, tool_choice, **kwargs)
-        
-        # Try to extract JSON from the response
         extracted = self._extract_json(response)
-        if extracted:
-            return extracted
+        return extracted if extracted else response
+    
+    def _is_facts_extraction_request(self, messages) -> bool:
+        """Check if this is a Mem0 facts extraction request."""
+        for msg in messages:
+            content = msg.get("content", "")
+            if isinstance(content, str) and '"facts"' in content and "Personal Information Organizer" in content:
+                return True
+        return False
+    
+    def _generate_with_tool_use(self, messages, **kwargs):
+        """Generate response using Tool Use for structured output."""
+        # Separate system message
+        system_message = ""
+        filtered_messages = []
+        for message in messages:
+            if message["role"] == "system":
+                system_message = message["content"]
+            else:
+                filtered_messages.append(message)
         
-        # If no JSON found, return original response
-        return response
+        try:
+            # Only use temperature OR top_p, not both (Claude 4.x requirement)
+            response = self.client.messages.create(
+                model=self.config.model,
+                max_tokens=self.config.max_tokens or 1500,
+                temperature=0.1,  # Use only temperature, not top_p
+                system=system_message,
+                messages=filtered_messages,
+                tools=[FACTS_EXTRACTION_TOOL],
+                tool_choice={"type": "tool", "name": "extract_facts"}
+            )
+            
+            # Extract the tool use result
+            for block in response.content:
+                if block.type == "tool_use" and block.name == "extract_facts":
+                    # Return the structured JSON
+                    result = json.dumps(block.input)
+                    logger.info(f"[Memory] Tool use extracted facts: {result}")
+                    return result
+            
+            # Fallback if no tool use found
+            logger.warning("[Memory] No tool use in response, falling back to text")
+            if response.content and response.content[0].type == "text":
+                return self._extract_json(response.content[0].text) or response.content[0].text
+            
+            return '{"facts": []}'
+            
+        except Exception as e:
+            logger.error(f"[Memory] Tool use failed: {e}, falling back to normal generation")
+            # Fallback to normal generation
+            response = super().generate_response(messages, **kwargs)
+            return self._extract_json(response) or response
     
     def _extract_json(self, text: str) -> Optional[str]:
-        """Extract JSON object from text that may contain preamble."""
+        """Extract JSON object from text (fallback for non-tool responses)."""
         if not text:
             return None
         
-        # Try to find JSON object pattern
-        # Look for {"facts": ...} pattern
-        match = re.search(r'\{[^{}]*"facts"\s*:\s*\[[^\]]*\][^{}]*\}', text, re.DOTALL)
-        if match:
-            try:
-                # Validate it's proper JSON
-                json.loads(match.group())
-                return match.group()
-            except json.JSONDecodeError:
-                pass
+        # Strip markdown code blocks if present
+        text = text.strip()
+        if text.startswith("```"):
+            lines = text.split("\n")
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            text = "\n".join(lines)
         
         # Try to find any JSON object
         match = re.search(r'\{[\s\S]*\}', text)
