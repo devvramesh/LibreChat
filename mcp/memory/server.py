@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 MCP Memory Server using Mem0 for intelligent memory extraction and semantic retrieval.
-Uses Ollama for LLM and embeddings, Qdrant for vector storage.
 
-This implementation manually implements the MCP SSE transport protocol.
-IMPORTANT: Responses are sent via SSE events, not POST response bodies.
+LLM: Configurable - Anthropic (fast), Bedrock (future), or Ollama (slow fallback)
+Embeddings: Ollama nomic-embed-text (fast, free)
+Vector Store: Qdrant
 """
 
 import os
@@ -13,6 +13,8 @@ import asyncio
 import logging
 import uuid
 from typing import Optional, Dict, Any
+from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import FastAPI, Request, Response
 from starlette.responses import StreamingResponse
@@ -20,49 +22,134 @@ import uvicorn
 
 from mem0 import Memory
 
-# Configure logging
+# =============================================================================
+# LOGGING
+# =============================================================================
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Environment configuration
-OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://ollama:11434")
-QDRANT_HOST = os.environ.get("QDRANT_HOST", "qdrant")
-QDRANT_PORT = int(os.environ.get("QDRANT_PORT", 6333))
-PORT = int(os.environ.get("PORT", 3003))
-LLM_MODEL = os.environ.get("LLM_MODEL", "llama3.1:8b")
-EMBED_MODEL = os.environ.get("EMBED_MODEL", "nomic-embed-text")
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
 
-# Mem0 configuration
+# LLM Provider: "anthropic", "bedrock", "ollama"
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "anthropic")
+
+# Anthropic config
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-3-5-haiku-latest")
+
+# Bedrock config (for future use)
+AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+BEDROCK_MODEL = os.environ.get("BEDROCK_MODEL", "anthropic.claude-3-haiku-20240307-v1:0")
+
+# Ollama config
+OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://ollama:11434")
+OLLAMA_LLM_MODEL = os.environ.get("OLLAMA_LLM_MODEL", "llama3.1:8b")
+OLLAMA_EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
+
+# Qdrant config
+QDRANT_HOST = os.environ.get("QDRANT_HOST", "qdrant")
+QDRANT_PORT = int(os.environ.get("QDRANT_PORT", "6333"))
+
 # nomic-embed-text produces 768-dimensional embeddings
 EMBED_DIMS = 768
 
-config = {
-    "llm": {
-        "provider": "ollama",
-        "config": {
-            "model": LLM_MODEL,
-            "ollama_base_url": OLLAMA_HOST,
-        }
-    },
-    "embedder": {
-        "provider": "ollama",
-        "config": {
-            "model": EMBED_MODEL,
-            "ollama_base_url": OLLAMA_HOST,
-            "embedding_dims": EMBED_DIMS,
-        }
-    },
-    "vector_store": {
-        "provider": "qdrant",
-        "config": {
-            "host": QDRANT_HOST,
-            "port": QDRANT_PORT,
-            "embedding_model_dims": EMBED_DIMS,
-        }
-    }
-}
+PORT = int(os.environ.get("PORT", "3003"))
 
-# Initialize Mem0 (lazy initialization)
+# Thread pool for sync Mem0 operations
+executor = ThreadPoolExecutor(max_workers=4)
+
+# =============================================================================
+# MEM0 CONFIG BUILDER
+# =============================================================================
+
+def get_llm_config() -> dict:
+    """Get LLM config based on provider setting."""
+    
+    if LLM_PROVIDER == "anthropic":
+        if not ANTHROPIC_API_KEY:
+            raise ValueError("ANTHROPIC_API_KEY required when LLM_PROVIDER=anthropic")
+        
+        logger.info(f"[Memory] Using Anthropic LLM: {ANTHROPIC_MODEL}")
+        return {
+            "provider": "anthropic",
+            "config": {
+                "model": ANTHROPIC_MODEL,
+                "api_key": ANTHROPIC_API_KEY,
+                "temperature": 0.1,
+                "max_tokens": 1500
+            }
+        }
+    
+    elif LLM_PROVIDER == "bedrock":
+        logger.info(f"[Memory] Using AWS Bedrock LLM: {BEDROCK_MODEL}")
+        return {
+            "provider": "aws_bedrock",
+            "config": {
+                "model": BEDROCK_MODEL,
+                "region": AWS_REGION,
+                "temperature": 0.1,
+                "max_tokens": 1500
+            }
+        }
+    
+    elif LLM_PROVIDER == "ollama":
+        logger.info(f"[Memory] Using Ollama LLM: {OLLAMA_LLM_MODEL} (WARNING: may be slow)")
+        return {
+            "provider": "ollama",
+            "config": {
+                "model": OLLAMA_LLM_MODEL,
+                "ollama_base_url": OLLAMA_HOST,
+                "temperature": 0.1
+            }
+        }
+    
+    else:
+        raise ValueError(f"Unknown LLM_PROVIDER: {LLM_PROVIDER}. Use 'anthropic', 'bedrock', or 'ollama'")
+
+
+def build_mem0_config() -> dict:
+    """
+    Build Mem0 configuration based on LLM_PROVIDER env var.
+    
+    Embeddings always use Ollama (fast, free).
+    LLM can be anthropic, bedrock, or ollama.
+    """
+    
+    config = {
+        # Vector store - always Qdrant
+        "vector_store": {
+            "provider": "qdrant",
+            "config": {
+                "host": QDRANT_HOST,
+                "port": QDRANT_PORT,
+                "embedding_model_dims": EMBED_DIMS,
+            }
+        },
+        
+        # Embeddings - always Ollama (fast enough, free)
+        "embedder": {
+            "provider": "ollama",
+            "config": {
+                "model": OLLAMA_EMBED_MODEL,
+                "ollama_base_url": OLLAMA_HOST,
+                "embedding_dims": EMBED_DIMS,
+            }
+        },
+        
+        # LLM - configurable
+        "llm": get_llm_config()
+    }
+    
+    return config
+
+
+# =============================================================================
+# INITIALIZE MEM0 (lazy)
+# =============================================================================
+
 memory: Optional[Memory] = None
 
 
@@ -70,33 +157,27 @@ def get_memory() -> Memory:
     """Get or initialize the Mem0 client."""
     global memory
     if memory is None:
-        logger.info("Initializing Mem0 with config: %s", config)
+        logger.info(f"[Memory] Initializing with LLM_PROVIDER={LLM_PROVIDER}")
+        config = build_mem0_config()
         memory = Memory.from_config(config)
-        logger.info("Mem0 initialized successfully")
+        logger.info("[Memory] Mem0 initialized successfully")
     return memory
 
 
-# Store active sessions with queues for SSE messages
-sessions: Dict[str, Dict[str, Any]] = {}
+# =============================================================================
+# TOOL DEFINITIONS
+# =============================================================================
 
-# MCP Server info
-SERVER_INFO = {
-    "name": "memory",
-    "version": "1.0.0",
-    "protocolVersion": "2024-11-05"
-}
-
-# Tool definitions
 TOOLS = [
     {
         "name": "add_memory",
-        "description": "Store a new memory. Call this when the user shares important information about themselves, their preferences, projects, or anything worth remembering for future conversations. Do NOT store trivial or temporary information.",
+        "description": "Store important information about the user (preferences, facts, context, projects). Use this to remember things for future conversations. Do NOT store trivial or temporary information.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "content": {
                     "type": "string",
-                    "description": "The information to remember"
+                    "description": "The information to remember (e.g., 'User prefers dark mode', 'User is working on a LibreChat project')"
                 },
                 "user_id": {
                     "type": "string",
@@ -109,13 +190,13 @@ TOOLS = [
     },
     {
         "name": "search_memory",
-        "description": "Search memories semantically. Use this to recall information from past conversations. Returns relevant memories ranked by relevance.",
+        "description": "Search stored memories semantically. Use this to recall user preferences, past context, or stored facts.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "What to search for in memories"
+                    "description": "What to search for (e.g., 'programming preferences', 'current projects')"
                 },
                 "user_id": {
                     "type": "string",
@@ -124,8 +205,8 @@ TOOLS = [
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum number of results (default: 10)",
-                    "default": 10
+                    "description": "Maximum results to return (default: 5)",
+                    "default": 5
                 }
             },
             "required": ["query"]
@@ -133,7 +214,7 @@ TOOLS = [
     },
     {
         "name": "get_all_memories",
-        "description": "Get all stored memories for a user. Use sparingly - prefer search_memory for specific queries.",
+        "description": "Retrieve all stored memories for a user. Use sparingly - prefer search_memory for specific queries.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -147,7 +228,7 @@ TOOLS = [
     },
     {
         "name": "delete_memory",
-        "description": "Delete a specific memory by ID. Use when user asks to forget something.",
+        "description": "Delete a specific memory by its ID. Use when user asks to forget something.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -162,130 +243,143 @@ TOOLS = [
 ]
 
 
-def call_tool(name: str, arguments: dict) -> dict:
-    """Execute a tool and return the result."""
+# =============================================================================
+# TOOL EXECUTION
+# =============================================================================
+
+def call_tool_sync(name: str, arguments: dict) -> dict:
+    """Execute a tool synchronously (runs in thread pool)."""
     try:
         mem = get_memory()
 
         if name == "add_memory":
-            content = arguments["content"]
+            content = arguments.get("content", "")
             user_id = arguments.get("user_id", "default")
 
-            logger.info(f"Adding memory for user {user_id}: {content[:50]}...")
+            if not content:
+                return {"content": [{"type": "text", "text": "Error: content is required"}], "isError": True}
+
+            logger.info(f"[Memory] Adding memory for user {user_id}: {content[:50]}...")
+            start_time = datetime.now()
+            
             result = mem.add(content, user_id=user_id)
+            
+            elapsed = (datetime.now() - start_time).total_seconds()
+            logger.info(f"[Memory] Memory added in {elapsed:.2f}s")
 
             return {
                 "content": [{
                     "type": "text",
-                    "text": json.dumps({
-                        "status": "success",
-                        "message": "Memory stored successfully",
-                        "result": result
-                    }, indent=2)
+                    "text": f"Memory stored successfully in {elapsed:.2f}s. Result: {json.dumps(result, default=str)}"
                 }]
             }
 
         elif name == "search_memory":
-            query = arguments["query"]
+            query = arguments.get("query", "")
             user_id = arguments.get("user_id", "default")
-            limit = arguments.get("limit", 10)
+            limit = arguments.get("limit", 5)
 
-            logger.info(f"Searching memories for user {user_id}: {query}")
+            if not query:
+                return {"content": [{"type": "text", "text": "Error: query is required"}], "isError": True}
+
+            logger.info(f"[Memory] Searching memories for user {user_id}: {query}")
             response = mem.search(query, user_id=user_id, limit=limit)
             
             # Mem0 returns {'results': [...]} dict
             results = response.get("results", []) if isinstance(response, dict) else response
 
+            if not results:
+                return {"content": [{"type": "text", "text": f"No memories found for query: {query}"}]}
+
+            # Format results
             formatted = []
-            for r in results:
+            for i, r in enumerate(results):
                 if isinstance(r, dict):
-                    formatted.append({
-                        "id": r.get("id"),
-                        "memory": r.get("memory"),
-                        "score": r.get("score"),
-                        "created_at": r.get("created_at")
-                    })
+                    score = r.get("score", "N/A")
+                    text = r.get("memory", r.get("text", ""))
+                    mem_id = r.get("id", "unknown")
+                    formatted.append(f"[{i+1}] (score: {score:.3f if isinstance(score, float) else score}, id: {mem_id})\n{text}")
 
             return {
                 "content": [{
                     "type": "text",
-                    "text": json.dumps({
-                        "query": query,
-                        "total": len(formatted),
-                        "memories": formatted
-                    }, indent=2)
+                    "text": f"Found {len(results)} memories:\n\n" + "\n\n---\n\n".join(formatted)
                 }]
             }
 
         elif name == "get_all_memories":
             user_id = arguments.get("user_id", "default")
 
-            logger.info(f"Getting all memories for user {user_id}")
+            logger.info(f"[Memory] Getting all memories for user {user_id}")
             response = mem.get_all(user_id=user_id)
             
             # Mem0 may return {'results': [...]} dict or list
             results = response.get("results", []) if isinstance(response, dict) else response
 
+            if not results:
+                return {"content": [{"type": "text", "text": f"No memories stored for user: {user_id}"}]}
+
             formatted = []
-            for r in results:
+            for i, r in enumerate(results):
                 if isinstance(r, dict):
-                    formatted.append({
-                        "id": r.get("id"),
-                        "memory": r.get("memory"),
-                        "created_at": r.get("created_at")
-                    })
+                    text = r.get("memory", r.get("text", ""))
+                    mem_id = r.get("id", "unknown")
+                    created = r.get("created_at", "unknown")
+                    formatted.append(f"[{i+1}] (id: {mem_id}, created: {created})\n{text}")
 
             return {
                 "content": [{
                     "type": "text",
-                    "text": json.dumps({
-                        "user_id": user_id,
-                        "total": len(formatted),
-                        "memories": formatted
-                    }, indent=2)
+                    "text": f"All memories ({len(results)} total):\n\n" + "\n\n---\n\n".join(formatted)
                 }]
             }
 
         elif name == "delete_memory":
-            memory_id = arguments["memory_id"]
+            memory_id = arguments.get("memory_id", "")
 
-            logger.info(f"Deleting memory: {memory_id}")
+            if not memory_id:
+                return {"content": [{"type": "text", "text": "Error: memory_id is required"}], "isError": True}
+
+            logger.info(f"[Memory] Deleting memory: {memory_id}")
             mem.delete(memory_id)
 
             return {
                 "content": [{
                     "type": "text",
-                    "text": json.dumps({
-                        "status": "success",
-                        "message": f"Memory {memory_id} deleted"
-                    }, indent=2)
+                    "text": f"Memory {memory_id} deleted successfully"
                 }]
             }
 
         else:
-            return {
-                "content": [{
-                    "type": "text",
-                    "text": json.dumps({"error": f"Unknown tool: {name}"})
-                }],
-                "isError": True
-            }
+            return {"content": [{"type": "text", "text": f"Unknown tool: {name}"}], "isError": True}
 
     except Exception as e:
-        logger.error(f"Error in tool {name}: {e}")
+        logger.error(f"[Memory] Error in tool {name}: {e}", exc_info=True)
         return {
-            "content": [{
-                "type": "text",
-                "text": json.dumps({
-                    "error": str(e),
-                    "tool": name
-                }, indent=2)
-            }],
+            "content": [{"type": "text", "text": f"Error: {str(e)}"}],
             "isError": True
         }
 
 
-def handle_message(message: dict, session_id: str) -> Optional[dict]:
+async def call_tool_async(name: str, arguments: dict) -> dict:
+    """Execute a tool asynchronously using thread pool."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(executor, call_tool_sync, name, arguments)
+
+
+# =============================================================================
+# MCP MESSAGE HANDLING
+# =============================================================================
+
+# MCP Server info
+SERVER_INFO = {
+    "name": "memory",
+    "version": "1.0.0",
+    "protocolVersion": "2024-11-05"
+}
+
+
+def handle_message_sync(message: dict, session_id: str) -> Optional[dict]:
     """Handle an incoming MCP message and return the response."""
     method = message.get("method")
     msg_id = message.get("id")
@@ -294,7 +388,7 @@ def handle_message(message: dict, session_id: str) -> Optional[dict]:
     logger.info(f"[{session_id}] Handling method: {method}, id: {msg_id}")
 
     if method == "initialize":
-        response = {
+        return {
             "jsonrpc": "2.0",
             "id": msg_id,
             "result": {
@@ -308,31 +402,27 @@ def handle_message(message: dict, session_id: str) -> Optional[dict]:
                 }
             }
         }
-        logger.info(f"[{session_id}] Sending initialize response")
-        return response
 
     elif method == "notifications/initialized":
-        # No response needed for notifications
         logger.info(f"[{session_id}] Received initialized notification")
         return None
 
     elif method == "tools/list":
-        response = {
+        logger.info(f"[{session_id}] Sending tools list with {len(TOOLS)} tools")
+        return {
             "jsonrpc": "2.0",
             "id": msg_id,
             "result": {
                 "tools": TOOLS
             }
         }
-        logger.info(f"[{session_id}] Sending tools list with {len(TOOLS)} tools")
-        return response
 
     elif method == "tools/call":
         tool_name = params.get("name")
         arguments = params.get("arguments", {})
 
         logger.info(f"[{session_id}] Calling tool: {tool_name}")
-        result = call_tool(tool_name, arguments)
+        result = call_tool_sync(tool_name, arguments)
 
         return {
             "jsonrpc": "2.0",
@@ -359,17 +449,46 @@ def handle_message(message: dict, session_id: str) -> Optional[dict]:
         }
 
 
-# FastAPI app
+async def handle_message_async(message: dict, session_id: str) -> Optional[dict]:
+    """Handle message asynchronously - tools run in thread pool."""
+    method = message.get("method")
+    
+    # Tool calls run in thread pool for async behavior
+    if method == "tools/call":
+        msg_id = message.get("id")
+        params = message.get("params", {})
+        tool_name = params.get("name")
+        arguments = params.get("arguments", {})
+
+        logger.info(f"[{session_id}] Calling tool async: {tool_name}")
+        result = await call_tool_async(tool_name, arguments)
+
+        return {
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "result": result
+        }
+    
+    # Other methods are fast, run sync
+    return handle_message_sync(message, session_id)
+
+
+# =============================================================================
+# FASTAPI APP
+# =============================================================================
+
 app = FastAPI(title="MCP Memory Server")
+
+# Store active sessions
+sessions: Dict[str, Dict[str, Any]] = {}
 
 
 @app.get("/sse")
 async def sse_endpoint(request: Request):
     """SSE endpoint for MCP communication."""
     session_id = str(uuid.uuid4())
-    logger.info(f"SSE connection request: {session_id}")
+    logger.info(f"[Memory] SSE connection request: {session_id}")
 
-    # Create a queue for this session's events
     event_queue: asyncio.Queue = asyncio.Queue()
     sessions[session_id] = {
         "connected": True,
@@ -378,23 +497,18 @@ async def sse_endpoint(request: Request):
 
     async def event_generator():
         try:
-            # Send the endpoint event immediately
+            # Send the endpoint event
             endpoint_url = f"/messages?sessionId={session_id}"
-            endpoint_event = f"event: endpoint\ndata: {endpoint_url}\n\n"
-            logger.info(f"[{session_id}] Sending endpoint event: {endpoint_url}")
-            yield endpoint_event
+            yield f"event: endpoint\ndata: {endpoint_url}\n\n"
 
             # Keep connection alive and send queued messages
             while sessions.get(session_id, {}).get("connected", False):
                 try:
-                    # Wait for messages with timeout
                     msg = await asyncio.wait_for(event_queue.get(), timeout=15.0)
-                    # Send message as SSE event
                     msg_json = json.dumps(msg)
                     logger.info(f"[{session_id}] Sending SSE message: {msg_json[:200]}")
                     yield f"event: message\ndata: {msg_json}\n\n"
                 except asyncio.TimeoutError:
-                    # Send keepalive ping
                     yield ": keepalive\n\n"
 
         except asyncio.CancelledError:
@@ -412,23 +526,16 @@ async def sse_endpoint(request: Request):
             "Cache-Control": "no-cache, no-store, must-revalidate",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
-            "Access-Control-Allow-Origin": "*",
         }
     )
 
 
 @app.post("/messages")
 async def messages_endpoint(request: Request):
-    """Handle incoming MCP messages.
-    
-    In MCP SSE transport, responses should be sent via the SSE stream,
-    not as POST response body. This endpoint queues responses.
-    """
+    """Handle incoming MCP messages. Responses sent via SSE."""
     session_id = request.query_params.get("sessionId")
-    logger.info(f"POST /messages received, sessionId: {session_id}")
 
     if not session_id or session_id not in sessions:
-        logger.warning(f"Invalid sessionId: {session_id}")
         return Response(
             content=json.dumps({"error": "Invalid or missing sessionId"}),
             status_code=400,
@@ -437,29 +544,22 @@ async def messages_endpoint(request: Request):
 
     try:
         body = await request.json()
-        logger.info(f"[{session_id}] Message body: {json.dumps(body)[:200]}")
+        logger.info(f"[{session_id}] Message: {body.get('method', 'unknown')}")
 
-        response = handle_message(body, session_id)
+        response = await handle_message_async(body, session_id)
 
         if response is not None:
-            # Queue the response to be sent via SSE
             session = sessions.get(session_id)
             if session and session.get("queue"):
                 await session["queue"].put(response)
-                logger.info(f"[{session_id}] Response queued for SSE delivery")
 
-        # Return 202 Accepted - actual response goes via SSE
         return Response(status_code=202)
 
     except Exception as e:
         logger.error(f"[{session_id}] Error handling message: {e}", exc_info=True)
-        # Queue error response via SSE
         error_response = {
             "jsonrpc": "2.0",
-            "error": {
-                "code": -32603,
-                "message": str(e)
-            }
+            "error": {"code": -32603, "message": str(e)}
         }
         session = sessions.get(session_id)
         if session and session.get("queue"):
@@ -470,13 +570,30 @@ async def messages_endpoint(request: Request):
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
-    return {"status": "ok", "service": "mcp-memory", "sessions": len(sessions)}
+    return {
+        "status": "ok",
+        "service": "mcp-memory",
+        "llm_provider": LLM_PROVIDER,
+        "llm_model": ANTHROPIC_MODEL if LLM_PROVIDER == "anthropic" else BEDROCK_MODEL if LLM_PROVIDER == "bedrock" else OLLAMA_LLM_MODEL,
+        "embed_model": OLLAMA_EMBED_MODEL,
+        "sessions": len(sessions)
+    }
 
+
+# =============================================================================
+# MAIN
+# =============================================================================
 
 if __name__ == "__main__":
-    logger.info(f"Starting MCP Memory Server on port {PORT}")
-    logger.info(f"Ollama host: {OLLAMA_HOST}")
-    logger.info(f"Qdrant: {QDRANT_HOST}:{QDRANT_PORT}")
-    logger.info(f"LLM model: {LLM_MODEL}, Embed model: {EMBED_MODEL}")
+    logger.info(f"[Memory] Starting MCP Memory Server on port {PORT}")
+    logger.info(f"[Memory] LLM Provider: {LLM_PROVIDER}")
+    if LLM_PROVIDER == "anthropic":
+        logger.info(f"[Memory] Anthropic Model: {ANTHROPIC_MODEL}")
+    elif LLM_PROVIDER == "bedrock":
+        logger.info(f"[Memory] Bedrock Model: {BEDROCK_MODEL}")
+    else:
+        logger.info(f"[Memory] Ollama LLM Model: {OLLAMA_LLM_MODEL}")
+    logger.info(f"[Memory] Ollama Embed Model: {OLLAMA_EMBED_MODEL}")
+    logger.info(f"[Memory] Qdrant: {QDRANT_HOST}:{QDRANT_PORT}")
 
     uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info")

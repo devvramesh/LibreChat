@@ -131,18 +131,36 @@ services:
       - "6333:6333"
     restart: unless-stopped
   # MCP Memory Server with Mem0
+  # Pricing: Anthropic Haiku ~$0.0004 per memory operation (1000 ops ≈ $0.40)
   mcp_memory:
     build:
       context: ./mcp/memory
       dockerfile: Dockerfile
     container_name: mcp_memory
     environment:
+      # LLM Provider: "anthropic" (fast), "bedrock" (future), "ollama" (slow fallback)
+      LLM_PROVIDER: "anthropic"
+      
+      # Anthropic (recommended - fastest, ~0.25s per operation)
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+      ANTHROPIC_MODEL: "claude-3-5-haiku-latest"
+      
+      # AWS Bedrock (uncomment to use instead of Anthropic)
+      # LLM_PROVIDER: "bedrock"
+      # AWS_REGION: "${AWS_REGION:-us-east-1}"
+      # BEDROCK_MODEL: "anthropic.claude-3-haiku-20240307-v1:0"
+      
+      # Ollama for embeddings (always used - fast and free)
       OLLAMA_HOST: "http://ollama:11434"
+      OLLAMA_EMBED_MODEL: "nomic-embed-text"
+      # Ollama LLM fallback (uncomment if LLM_PROVIDER=ollama)
+      OLLAMA_LLM_MODEL: "llama3.1:8b"
+      
+      # Qdrant vector store
       QDRANT_HOST: "qdrant"
       QDRANT_PORT: "6333"
+      
       PORT: "3003"
-      LLM_MODEL: "llama3.1:8b"
-      EMBED_MODEL: "nomic-embed-text"
     ports:
       - "3003:3003"
     depends_on:
